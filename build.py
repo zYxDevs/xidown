@@ -26,7 +26,7 @@ ICON_PATH = ROOT_DIR / FAVICON_PATH \
 
 # These are the important part for this app builder
 # Only change if and only if needed or project migration
-APP_ENTRY_POINT = ROOT_DIR / APP_NAME / "app.py"
+APP_ENTRY_POINT = ROOT_DIR / "xidown" / "app.py"
 
 EXEC_PATH = sys.executable
 REQUIRED_DEPS = {

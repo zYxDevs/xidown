@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xidown"
-version = "0.0.1"
+version = "1.25.1.18"
+
+
 description = "A powerful, GUI-based video and audio downloading application built with Python"
 readme = "README.md"
 requires-python = ">=3.8"

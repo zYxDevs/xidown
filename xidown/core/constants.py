@@ -42,6 +42,11 @@ DEFAULT_POPEN_KWARGS = {
     "bufsize": 1
 }
 
+def get_popen_kwargs() -> dict:
+    """Return a defensive copy of DEFAULT_POPEN_KWARGS to prevent global dict mutation."""
+    return DEFAULT_POPEN_KWARGS.copy()
+
+
 # =========================================== #
 #             SETUP CONFIGURATION             #
 # =========================================== #

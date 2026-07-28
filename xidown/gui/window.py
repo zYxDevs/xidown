@@ -9,36 +9,15 @@ import time
 from PIL import Image, ImageOps
 from io import BytesIO
 import tkinter 
+
 from xidown.core import utils
+from xidown.core.config import DATA_DIR, THUMB_DIR
+from xidown.core.version import WINDOW_TITLE, APP_NAME
 
-# [MARIBEL] Import data from version.py for convenience
-try:
-    from xidown.core.version import WINDOW_TITLE, APP_NAME
-except ImportError:
-    WINDOW_TITLE = "Downloader App"
-    APP_NAME = "My Downloader"
-
+BASE_DIR = utils.get_rootdir()
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# NAVIGATION FIX (Fix to ensure data resides in Root, not package)
-if getattr(sys, 'frozen', False):
-    # If run as EXE (frozen)
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    # If run as Python script (Development)
-    # Location of this file: xidown/xidown/gui/window.py
-    current_dir = os.path.dirname(os.path.abspath(__file__)) # .../xidown/gui
-    package_dir = os.path.dirname(current_dir)               # .../xidown (Package)
-    BASE_DIR = os.path.dirname(package_dir)                  # .../xidown (Project Root)
 
-DATA_DIR = os.path.join(os.path.expanduser("~"), "Videos", "xidown")
-THUMB_DIR = os.path.join(DATA_DIR, "thumbs")
-if not os.path.exists(THUMB_DIR):
-    os.makedirs(THUMB_DIR)
-    try:
-        import ctypes
-        ctypes.windll.kernel32.SetFileAttributesW(str(THUMB_DIR), 2)
-    except: pass
 
 # UTILS: GHOST CLASS & MENU
 class RightClickMenu(ctk.CTkToplevel):

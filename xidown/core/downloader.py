@@ -2,21 +2,20 @@ import subprocess
 import sys
 import re
 import os
-import ctypes
 import threading
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple, Union
 
 from xidown.core.constants import (
     DEFAULT_OUTPUT_TEMPLATE,
-    DEFAULT_POPEN_KWARGS,
+    get_popen_kwargs,
     DOWNLOAD_MAX_RETRIES,
     FRAGMENT_MAX_RETRIES,
     FORMAT_SELECTION,
     SOCKET_TIMEOUT,
 )
 from xidown.core.types import AnyCallable, AnyDict, PathLike
-from xidown.core.utils import sanitize_filename, safe_rmdir
+from xidown.core.utils import sanitize_filename, safe_rmdir, hide_directory
 
 def run(url: str, result_folder: PathLike,
         audio_only: bool,
@@ -38,22 +37,19 @@ def run(url: str, result_folder: PathLike,
     # 1. Ensure primary output directory exists
     result_folder = Path(result_folder).absolute()
     if not result_folder.exists():
-        result_folder.mkdir(parents=True)
+        result_folder.mkdir(parents=True, exist_ok=True)
 
     # 1.b. Create temporary processing folder
     folder_temp = result_folder / "process"
     if not folder_temp.exists():
-        folder_temp.mkdir()
-        if os.name == 'nt':
-            try:
-                ctypes.windll.kernel32.SetFileAttributesW(str(folder_temp), 0x02) # Attribute Hidden
-            except: pass
+        folder_temp.mkdir(exist_ok=True)
+        hide_directory(folder_temp)
 
     # 2. Determine output filename template
     if custom_title:
         clean_title = sanitize_filename(custom_title)
-        if len(clean_title) > 200: 
-            clean_title = clean_title[:200]
+        if len(str(clean_title)) > 200: 
+            clean_title = str(clean_title)[:200]
         output_template = f"{clean_title}.%(ext)s"
     else:
         output_template = DEFAULT_OUTPUT_TEMPLATE
@@ -89,7 +85,7 @@ def run(url: str, result_folder: PathLike,
         selected_format = FORMAT_SELECTION.get(quality_setting) or FORMAT_SELECTION['medium']
         base_cmd.extend(['-f', selected_format])
 
-        if quality_setting == 'excellent' or quality_setting == 'best':
+        if quality_setting in ('excellent', 'best'):
             base_cmd.extend(['--merge-output-format', 'mp4'])
 
         # SUBTITLE PROCESSING
@@ -97,10 +93,9 @@ def run(url: str, result_folder: PathLike,
             if isinstance(sub_langs, list):
                 langs_str = ",".join(sub_langs)
             else:
-                langs_str = sub_langs
+                langs_str = str(sub_langs)
             base_cmd.extend(["--write-subs", "--sub-langs", langs_str])
 
-        # Add-on: Force thumbnail to jpg for correct embedding
         base_cmd.extend(['--embed-thumbnail', '--convert-thumbnails', 'jpg', '--add-metadata'])
 
     # 5. Proxy & Cut
@@ -117,7 +112,7 @@ def run(url: str, result_folder: PathLike,
             ])
 
     # 6. Execute Process with cookie fallback support
-    popen_kwargs = DEFAULT_POPEN_KWARGS
+    popen_kwargs = get_popen_kwargs()  # Defensive copy to avoid mutating global constants
 
     if sys.platform == "win32":
         startupinfo = subprocess.STARTUPINFO()
@@ -135,6 +130,7 @@ def run(url: str, result_folder: PathLike,
         if attempt_cookie:
             cmd.extend(['--cookies', attempt_cookie])
 
+        process = None
         try:
             process = subprocess.Popen(cmd, **popen_kwargs)
 
@@ -148,13 +144,17 @@ def run(url: str, result_folder: PathLike,
 
             while True:
                 if stop_event.is_set():
-                    process.kill()
+                    if process and process.poll() is None:
+                        process.kill()
+                        process.wait()
                     if callback_progress:
                         callback_progress(0, "Cancelled by User.")
                     break
 
-                # process.stdout can be None, should have a protection here
-                line = process.stdout.readline() if process.stdout else None
+                if not process or not process.stdout:
+                    break
+
+                line = process.stdout.readline()
                 if not line and process.poll() is not None:
                     break
                 elif not line:
@@ -162,14 +162,12 @@ def run(url: str, result_folder: PathLike,
 
                 line = line.strip()
 
-                # >> Already downloaded
                 if "has already been downloaded" in line.lower():
                     file_exists = True
                     is_done = True
                     if callback_progress:
                         callback_progress(100, "File already exists!")
 
-                # >> On progress (fragment)
                 elif "fragment" in line.lower() and "of" in line.lower():
                     match_frag = pattern_fragment.search(line)
                     if not match_frag: continue
@@ -178,15 +176,13 @@ def run(url: str, result_folder: PathLike,
                         curr_frag = int(match_frag.group(1))
                         total_frag = int(match_frag.group(2))
 
-                        if total_frag > 0: percent = (curr_frag / total_frag) * 100
-                        else: percent = 0
+                        percent = (curr_frag / total_frag * 100) if total_frag > 0 else 0
                         msg = f"Part {curr_frag}/{total_frag} • Gathering pieces..."
 
                         if callback_progress:
                             callback_progress(percent, msg)
                     except Exception: pass
 
-                # >> On progress (download)
                 elif "%" in line and "[download]" in line:
                     match_percent = pattern_percent_simple.search(line)
                     if not match_percent: continue
@@ -209,7 +205,6 @@ def run(url: str, result_folder: PathLike,
                             callback_progress(percent, msg)
                     except Exception: pass
 
-                # >> On progress (ffmpeg)
                 elif "[ffmpeg]" in line or "Merger" in line:
                     is_done = True
                     if callback_progress: callback_progress(99, "Processing & Merging...")
@@ -221,7 +216,7 @@ def run(url: str, result_folder: PathLike,
                     if not (attempt_cookie and (None in tries)):
                         if callback_progress: callback_progress(0, f"ERR: {err_msg[:40]}")
 
-            rc = process.poll()
+            rc = process.poll() if process else -1
             is_success = (rc == 0) or is_done or file_exists
 
             if is_success:
@@ -248,4 +243,12 @@ def run(url: str, result_folder: PathLike,
 
         except Exception as e:
             if not attempt_cookie:
-                if callback_progress: callback_progress(0, f"SysErr: {str(e)[:40]}")
+                if callback_progress:
+                    callback_progress(0, f"Error: {str(e)[:40]}")
+        finally:
+            if process and process.poll() is None:
+                try:
+                    process.kill()
+                    process.wait()
+                except Exception:
+                    pass

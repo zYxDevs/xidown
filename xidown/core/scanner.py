@@ -11,10 +11,11 @@ from concurrent.futures import ThreadPoolExecutor
 from xidown.core.constants import (
     DEFAULT_MAX_WORKERS,
     DEFAULT_USER_AGENT,
-    DEFAULT_POPEN_KWARGS,
+    get_popen_kwargs,
     FORMAT_SELECTION
 )
 from xidown.core.types import AnyCallable, AnyDict
+from xidown.core.domain import DomainManager
 from xidown.gui import settings
 from xidown.core.utils import format_size, hitung_estimasi_mp3
 
@@ -30,22 +31,13 @@ def scan_single_url(url: str, tools: Tuple[str, ...], data_dir: str,
     cached_info = meta_cache.get(url, {})
     forced_title = cached_info.get('title')
     custom_headers = cached_info.get('headers', {})
-    used_cookie = Path(global_cookie_path).absolute()
 
-    domain_detect = "unknown"
-    if "facebook.com" in url:                    domain_detect = "facebook_com"
-    elif "bilibili.com" in url:                  domain_detect = "bilibili_com"
-    elif "tiktok.com" in url:                    domain_detect = "tiktok_com"
-    elif "x.com" in url or "twitter.com" in url: domain_detect = "x_com"
-    elif "youtube.com" in url:                   domain_detect = "youtube_com"
-
-    if data_dir:
-        specific_cookie = Path(data_dir) / f"cookies_{domain_detect}.txt"
-        if specific_cookie.is_file():
-            used_cookie = specific_cookie.absolute()
+    domain_detect = DomainManager.detect_domain(url)
+    cookie_path_str = DomainManager.get_domain_cookie_path(url, global_cookie_path)
+    used_cookie = Path(cookie_path_str).absolute() if cookie_path_str else None
 
     quality_mode: str = config.get("quality", "best")
-    fmt_arg = FORMAT_SELECTION[quality_mode]
+    fmt_arg = FORMAT_SELECTION.get(quality_mode, FORMAT_SELECTION['best'])
     user_agent = DEFAULT_USER_AGENT
 
     extra_headers = []
@@ -56,17 +48,14 @@ def scan_single_url(url: str, tools: Tuple[str, ...], data_dir: str,
                 user_agent = val
 
     referer_arg = []
-    if 'facebook.com' in url:   referer_arg = ['--referer', 'https://www.facebook.com/']
-    elif 'bilibili.com' in url: referer_arg = ['--referer', 'https://www.bilibili.com/']
-    elif 'tiktok.com' in url:   referer_arg = ['--referer', 'https://www.tiktok.com/']
-    elif 'youtube.com' in url:  referer_arg = []
+    if domain_detect == "facebook_com": referer_arg = ['--referer', 'https://www.facebook.com/']
+    elif domain_detect == "bilibili_com": referer_arg = ['--referer', 'https://www.bilibili.com/']
+    elif domain_detect == "tiktok_com": referer_arg = ['--referer', 'https://www.tiktok.com/']
 
-    # We will try with cookies first (if available), then fallback to no-cookies if it yields 0 items
     tries: List[Union[str, None]] = [str(used_cookie)] if (used_cookie and used_cookie.exists()) else [None]
     if used_cookie and used_cookie.exists():
         tries.append(None)
 
-    # Build the commands before the loop
     prebuilt_command = [
         yt_dlp_path,
         '--dump-json',
@@ -81,15 +70,13 @@ def scan_single_url(url: str, tools: Tuple[str, ...], data_dir: str,
     ]
 
     for current_cookie in tries:
-        # Shallow copy the prebuilt command
-        # If inside the prebuilt command has nested list, please use deep copy instead
         command = prebuilt_command.copy()
 
         if referer_arg: command.extend(referer_arg)
         if extra_headers: command.extend(extra_headers)
         if current_cookie: command.extend(['--cookies', current_cookie])
 
-        popen_kwargs = DEFAULT_POPEN_KWARGS
+        popen_kwargs = get_popen_kwargs()
         if sys.platform == "win32":
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -110,13 +97,21 @@ def scan_single_url(url: str, tools: Tuple[str, ...], data_dir: str,
             except json.JSONDecodeError:
                 pass
 
+        process = None
         try:
             process = subprocess.Popen(command, **popen_kwargs)
 
             while True:
-                if stop_event.is_set(): process.kill(); break
-                # process.stdout can be None, should have a protection here
-                line = process.stdout.readline() if process.stdout else None
+                if stop_event.is_set():
+                    if process and process.poll() is None:
+                        process.kill()
+                        process.wait()
+                    break
+
+                if not process or not process.stdout:
+                    break
+
+                line = process.stdout.readline()
                 if not line and process.poll() is not None:
                     break
                 elif not line:
@@ -125,31 +120,30 @@ def scan_single_url(url: str, tools: Tuple[str, ...], data_dir: str,
                 clean_line = line.strip()
                 if not clean_line: continue
 
-                # Process JSON data from output line
                 if clean_line.startswith('{') and clean_line.endswith('}'):
                     process_json_data(clean_line)
-
-                # Require login authentication or cookies
                 elif "Sign in" in clean_line or "login" in clean_line.lower():
                     callback_log(f"⚠ Login Required for {domain_detect}!")
-
-                # On download progress
                 elif clean_line.startswith('[') or "Downloading" in clean_line:
-                    short_message = clean_line
-                    if len(short_message) > 50: short_message = short_message[:47] + "..."
+                    short_message = clean_line[:47] + "..." if len(clean_line) > 50 else clean_line
                     callback_progress(f"🔍 {short_message}", 0)
 
-            # If items were successfully parsed, stop trying other options (like no-cookies)
             if items_found:
                 break
 
-            # If we used cookies and failed (0 items), warn and fallback
             if current_cookie:
                 callback_log(f"⚠️ Cookie scan failed for {domain_detect}. Retrying without cookies...")
 
         except Exception as e:
-            if not current_cookie: # Only log error on the final retry
+            if not current_cookie:
                 callback_log(f"Error Scan {url}: {str(e)}")
+        finally:
+            if process and process.poll() is None:
+                try:
+                    process.kill()
+                    process.wait()
+                except Exception:
+                    pass
 
 def process_and_send_data(data: AnyDict,
                           callback_item_found: AnyCallable,
@@ -173,9 +167,9 @@ def process_and_send_data(data: AnyDict,
             title = title_raw
 
     title = re.sub(r'^\(\d+\)\s*', '', title)
-    title = (title.replace(' - YouTube', '')   # YouTube
-                  .replace(' - PikPak', '')    # PikPak
-                  .replace(' | Facebook', '')  # Facebook
+    title = (title.replace(' - YouTube', '')
+                  .replace(' - PikPak', '')
+                  .replace(' | Facebook', '')
             )
 
     thumb = data.get('thumbnail', '')
@@ -194,21 +188,18 @@ def process_and_send_data(data: AnyDict,
     height = data.get('height')
     resolution_str = f"{height}p" if height else "??p"
 
-    # Extract Subtitles
     available_subs: Dict[str, str] = {}
     subs = data.get('subtitles') or {}
     auto_subs = data.get('automatic_captions') or {}
 
-    for lang_code in subs.keys():
-        name_list = subs[lang_code]
+    for lang_code, name_list in subs.items():
         lang_name = lang_code
         if name_list and isinstance(name_list, list) and 'name' in name_list[0]:
             lang_name = name_list[0]['name']
         available_subs[lang_code] = lang_name
 
-    for lang_code in auto_subs.keys():
+    for lang_code, name_list in auto_subs.items():
         if lang_code not in available_subs:
-            name_list = auto_subs[lang_code]
             lang_name = f"{lang_code} (Auto)"
             if name_list and isinstance(name_list, list) and 'name' in name_list[0]:
                 lang_name = f"{name_list[0]['name']} (Auto)"
@@ -245,17 +236,20 @@ def run_scan(links: Iterable[str], tools: Tuple[str, ...], data_dir: str,
 
     def safe_item_found(item):
         nonlocal total_found
-        nonlocal lock
         is_dup = False
-
         with lock:
             for existing in scan_data:
-                if existing['url_dl'] == item['url_dl']: is_dup = True; break
-            if not is_dup: total_found += 1
-        if not is_dup: callback_item_found(item)
-        else: callback_log(f"Skip Duplicate: {item['title'][:15]}...")
+                if existing['url_dl'] == item['url_dl']:
+                    is_dup = True
+                    break
+            if not is_dup:
+                total_found += 1
+        if not is_dup:
+            callback_item_found(item)
+        else:
+            callback_log(f"Skip Duplicate: {item['title'][:15]}...")
 
-    max_workers = DEFAULT_MAX_WORKERS  # Change this if want to use non-heavy processing
+    max_workers = DEFAULT_MAX_WORKERS
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
         for url in links:
@@ -269,5 +263,9 @@ def run_scan(links: Iterable[str], tools: Tuple[str, ...], data_dir: str,
             ))
         for f in futures:
             if stop_event.is_set(): break
-            f.result()
+            try:
+                f.result()
+            except Exception as e:
+                callback_log(f"Scanner Thread Error: {e}")
+
     callback_done(total_found)

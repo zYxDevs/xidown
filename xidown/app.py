@@ -3,25 +3,17 @@ import os
 import threading
 import json
 import logging
-import ctypes 
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 # PATH CONFIGURATION
-
-# 1. Set Root Directory
 if getattr(sys, 'frozen', False):
-    # [EXE MODE] Root is the location of the .exe file
     ROOT_DIR = os.path.dirname(sys.executable)
 else:
-    # [SCRIPT MODE] Root is the parent directory of this package
     ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Removed old source paths since xidown is now a package
-
-# 3. Define BASE_DIR
-BASE_DIR = ROOT_DIR
-
-sys.path.insert(0, ROOT_DIR)
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 # IMPORTS
 import customtkinter as ctk
@@ -38,20 +30,9 @@ from xidown.core import downloader
 from xidown.core import playlist
 from xidown.core import scanner
 from xidown.core.version import WINDOW_TITLE, APP_NAME
-
-# CONSTANTS & SETUP
-DATA_DIR = os.path.join(os.path.expanduser("~"), "Videos", "xidown")
-if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
-
-THUMB_DIR = os.path.join(DATA_DIR, "thumbs")
-if not os.path.exists(THUMB_DIR):
-    os.makedirs(THUMB_DIR)
-    try:
-        import ctypes
-        ctypes.windll.kernel32.SetFileAttributesW(str(THUMB_DIR), 2) # 2 = Hidden
-    except: pass
-
-HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
+from xidown.core.config import DATA_DIR, THUMB_DIR, PREVIEW_DIR, HISTORY_FILE, hide_directory
+from xidown.core.domain import DomainManager
+from xidown.core.state import AppStateManager
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -122,7 +103,8 @@ class CyreneApp(BaseLayout):
 
         self.show_loading_screen()
 
-        # --- Init Logic ---
+        # --- Centralized State Manager ---
+        self.app_state = AppStateManager()
 
         self.tools = utils.check_setup()
         self.settings_window = None 
@@ -134,15 +116,11 @@ class CyreneApp(BaseLayout):
         self.stop_event_scan = threading.Event()      
         self.stop_event_download = threading.Event()  
         
-        self.scan_data = [] 
         self.custom_save_path = ""
         self.widget_list = [] 
         self.result_folder_terakhir = ""
         self.url_meta_cache = {} 
         self.log_filter_cache = {} 
-        
-        self.undo_stack = []
-        self.redo_stack = []
 
         # --- Bind UI Actions ---
         self.btn_scan.configure(command=self.action_scan)
@@ -165,7 +143,6 @@ class CyreneApp(BaseLayout):
             self.btn_select_all.bind("<Button-2>", self.open_batch_menu)
         except Exception as e: print(f"Error: {e}")
 
-        # Removed seg_format binding because we replaced it with toggle buttonsup ---
         self.reload_initial_config()
         self.load_last_memory()
 
@@ -180,10 +157,27 @@ class CyreneApp(BaseLayout):
             self.btn_scan.configure(state="disabled")
             self.btn_download.configure(state="disabled")
         else: 
-            if self.scan_data:
-                self.update_dashboard(f"Ready. {len(self.scan_data)} videos loaded.", 0)
+            items = self.app_state.get_items()
+            if items:
+                self.update_dashboard(f"Ready. {len(items)} videos loaded.", 0)
             else:
                 self.update_dashboard("System Ready.", 0)
+
+    @property
+    def scan_data(self):
+        return self.app_state.get_items()
+
+    @scan_data.setter
+    def scan_data(self, new_items):
+        self.app_state.set_items(new_items)
+
+    @property
+    def undo_stack(self):
+        return self.app_state._undo_stack
+
+    @property
+    def redo_stack(self):
+        return self.app_state._redo_stack
 
     # UI COMPONENTS 
     def show_loading_screen(self):
@@ -202,12 +196,10 @@ class CyreneApp(BaseLayout):
         
         transparent_color = "#000001"
         splash.configure(fg_color=transparent_color)
-        import sys
         if sys.platform == 'win32':
             try: splash.attributes("-transparentcolor", transparent_color)
             except Exception as e: print(f"Error: {e}")
 
-        # Border for splash screen
         card_frame = ctk.CTkFrame(splash, fg_color="#121212", corner_radius=0, border_width=1, border_color="#333333")
         card_frame.pack(fill="both", expand=True, padx=2, pady=2)
 
@@ -263,8 +255,6 @@ class CyreneApp(BaseLayout):
             self.btn_back.pack(side="right", padx=0)
         except Exception as e:
             print(f"UI Injection Error: {e}")
-
-        # LOGIC FUNCTIONS
         
     def start_maribel_server(self):
         server = MaribelServer(self)
@@ -344,16 +334,20 @@ class CyreneApp(BaseLayout):
         cfg = settings.load_config()
         tools_updated = (self.tools[0], self.tools[1], cfg.get("cookie_path", ""))
 
+        def handle_item_found(item):
+            if self.app_state.add_item(item):
+                self.after(0, lambda: self.add_one_widget(item))
+
         scanner.run_scan(
             links=links,
             tools=tools_updated, 
             data_dir=DATA_DIR, 
-            scan_data=self.scan_data,
+            scan_data=self.app_state.get_items(),
             stop_event=self.stop_event_scan, 
             meta_cache=self.url_meta_cache, 
             callback_log=lambda t: self.after(0, lambda: self.write_log(t)),
             callback_progress=lambda t, v: self.after(0, lambda: self.update_dashboard(t, v)),
-            callback_item_found=lambda item: (self.scan_data.append(item), self.after(0, lambda: self.add_one_widget(item))),
+            callback_item_found=handle_item_found,
             callback_done=lambda count: self.after(0, lambda: self.finish_scan_gui(count))
         )
 
@@ -361,10 +355,11 @@ class CyreneApp(BaseLayout):
         self.is_scanning = False
         self.btn_scan.configure(text="Scan", fg_color="#db2777", hover_color="#be185d", state="normal")
         
-        if self.scan_data:
+        items = self.app_state.get_items()
+        if items:
             self.save_last_memory() 
             if not self.is_downloading:
-                self.update_dashboard(f"Scan Done! {len(self.scan_data)} items.", 1.0)
+                self.update_dashboard(f"Scan Done! {len(items)} items.", 1.0)
                 self.btn_download.configure(state="normal")
         else:
             if not self.is_downloading:
@@ -375,28 +370,33 @@ class CyreneApp(BaseLayout):
             threading.Thread(target=self.prompt_cookie_terminal, daemon=True).start()
 
     def prompt_cookie_terminal(self):
-        print("\n" + "="*50)
-        print(">>> WARNING: Scan results are empty or failed!")
-        print(">>> The video might require a login or the cookies are invalid.")
-        print(">>> Please enter the Cookies format (Netscape) or Cookies File Path.")
-        print(">>> Press ENTER to skip.")
-        cookie_val = input(">>> Enter Cookies (Path/String): ").strip()
-        if cookie_val:
-            config = settings.load_config()
-            if os.path.exists(cookie_val):
-                config["cookie_path"] = cookie_val
-                settings.save_config(config)
-                print(f">>> Cookie path saved: {cookie_val}")
-                self.after(0, lambda: self.write_log("Cookie path updated via terminal!"))
-            else:
-                custom_path = os.path.join(DATA_DIR, "custom_terminal_cookies.txt")
-                with open(custom_path, "w", encoding="utf-8") as f:
-                    f.write(cookie_val)
-                config["cookie_path"] = custom_path
-                settings.save_config(config)
-                print(f">>> Cookie string saved to: {custom_path}")
-                self.after(0, lambda: self.write_log("Cookie string saved via terminal!"))
-        print("="*50 + "\n")
+        if not sys.stdin or not sys.stdin.isatty():
+            return
+        try:
+            print("\n" + "="*50)
+            print(">>> WARNING: Scan results are empty or failed!")
+            print(">>> The video might require a login or the cookies are invalid.")
+            print(">>> Please enter the Cookies format (Netscape) or Cookies File Path.")
+            print(">>> Press ENTER to skip.")
+            cookie_val = input(">>> Enter Cookies (Path/String): ").strip()
+            if cookie_val:
+                config = settings.load_config()
+                if os.path.exists(cookie_val):
+                    config["cookie_path"] = cookie_val
+                    settings.save_config(config)
+                    print(f">>> Cookie path saved: {cookie_val}")
+                    self.after(0, lambda: self.write_log("Cookie path updated via terminal!"))
+                else:
+                    custom_path = os.path.join(DATA_DIR, "custom_terminal_cookies.txt")
+                    with open(custom_path, "w", encoding="utf-8") as f:
+                        f.write(cookie_val)
+                    config["cookie_path"] = custom_path
+                    settings.save_config(config)
+                    print(f">>> Cookie string saved to: {custom_path}")
+                    self.after(0, lambda: self.write_log("Cookie string saved via terminal!"))
+            print("="*50 + "\n")
+        except (EOFError, OSError):
+            pass
 
     # --- Widget & List Management ---
     def add_one_widget(self, data_item):
@@ -426,7 +426,7 @@ class CyreneApp(BaseLayout):
         self.widget_list.append(card)
         self.aksi_cek_seleksi_manual()
         
-        if len(self.scan_data) > 0 and not self.is_downloading:
+        if len(self.app_state.get_items()) > 0 and not self.is_downloading:
             self.btn_download.configure(state="normal")
 
     def action_swap_position(self, widget_a, widget_b):
@@ -440,39 +440,25 @@ class CyreneApp(BaseLayout):
             if idx_a == idx_b: return
 
             self.widget_list[idx_a], self.widget_list[idx_b] = self.widget_list[idx_b], self.widget_list[idx_a]
-            
-            data_a = widget_a.data
-            data_b = widget_b.data
-            
-            real_idx_a = self.scan_data.index(data_a)
-            real_idx_b = self.scan_data.index(data_b)
-            self.scan_data[real_idx_a], self.scan_data[real_idx_b] = self.scan_data[real_idx_b], self.scan_data[real_idx_a]
+            self.app_state.swap_items(widget_a.data, widget_b.data)
             
             if idx_a < idx_b: widget_a.pack(after=widget_b)
             else: widget_a.pack(before=widget_b)
             
             self.save_last_memory()
-                
         except ValueError: pass
 
     def action_on_pin_change(self, widget_yg_diklik=None):
-        self.scan_data.sort(key=lambda x: x.get('locked', False), reverse=True)
+        self.app_state.sort_locked_first()
         widget_map = {w.data['url_dl']: w for w in self.widget_list} 
         self.widget_list = []
-        for item_data in self.scan_data:
+        for item_data in self.app_state.get_items():
             w = widget_map.get(item_data['url_dl'])
             if w:
                 self.widget_list.append(w)
                 w.pack_forget()
                 w.pack(pady=2, padx=5, fill="x")
         self.save_last_memory()
-
-    def hide_folder(self, path):
-        try:
-            if os.name == 'nt' and os.path.exists(path):
-                ctypes.windll.kernel32.SetFileAttributesW(path, 0x02)
-        except Exception as e:
-            print(f"[System] Failed to hide folder: {e}")
 
     def action_test_play(self, item_data):
         threading.Thread(target=self.run_test_play, args=(item_data,), daemon=True).start()
@@ -493,26 +479,12 @@ class CyreneApp(BaseLayout):
         ffmpeg_p = self.tools[1]
         cookie_path_global = config.get("cookie_path", "")
         
-        domain_detect = "unknown"
-        if "facebook.com" in url: domain_detect = "facebook_com"
-        elif "bilibili.com" in url: domain_detect = "bilibili_com"
-        elif "tiktok.com" in url: domain_detect = "tiktok_com"
-        elif "youtube.com" in url: domain_detect = "youtube_com"
-        elif "x.com" in url or "twitter.com" in url: domain_detect = "x_com"
-        
-        specific_cookie = os.path.join(DATA_DIR, f"cookies_{domain_detect}.txt")
-        if os.path.exists(specific_cookie): used_cookie = specific_cookie
-        else: used_cookie = cookie_path_global
-
-        folder_preview = os.path.join(DATA_DIR, "preview_cache")
-        if not os.path.exists(folder_preview): 
-            os.makedirs(folder_preview)
-            self.hide_folder(folder_preview) 
+        used_cookie = DomainManager.get_domain_cookie_path(url, cookie_path_global)
+        folder_preview = PREVIEW_DIR
         
         tools_utk_ini = (yt_dlp_p, ffmpeg_p, used_cookie)
         stop_dummy = threading.Event()
         
-        import time
         unique_id = int(time.time())
         preview_filename = f"preview_{unique_id}" 
 
@@ -543,7 +515,7 @@ class CyreneApp(BaseLayout):
             self.after(0, lambda: self.write_log("Failed to download preview."))
 
     def open_batch_menu(self, event):
-        selected_count = sum(1 for d in self.scan_data if d.get('selected', False))
+        selected_count = sum(1 for d in self.app_state.get_items() if d.get('selected', False))
         if selected_count == 0:
             self.update_dashboard("No items selected for batch action.", 0)
             return
@@ -555,13 +527,7 @@ class CyreneApp(BaseLayout):
         RightClickMenu(self, (event.x_root, event.y_root), {'menu_list': menu_items}, mode="batch")
 
     def action_batch_lock(self, status_lock):
-        changed = False
-        for d in self.scan_data:
-            if d.get('selected', False):
-                if d.get('locked', False) != status_lock:
-                    d['locked'] = status_lock
-                    changed = True
-        if changed:
+        if self.app_state.batch_lock(status_lock):
             for w in self.widget_list: w.update_visual_data()
             self.action_on_pin_change()
             self.update_dashboard(f"Batch {'Pin' if status_lock else 'Unpin'} done.", 0)
@@ -573,30 +539,24 @@ class CyreneApp(BaseLayout):
             self.update_dashboard("Cannot delete while downloading!", 0)
             return
         
-        didelete_batch = [d for d in self.scan_data if d.get('selected', False)]
+        didelete_batch = self.app_state.batch_delete()
         if not didelete_batch: return
-
-        self.undo_stack.append({'type': 'batch', 'data': didelete_batch})
-        self.redo_stack.clear()
-        
-        remaining_data = [d for d in self.scan_data if not d.get('selected', False)]
-        self.scan_data = remaining_data
         
         for w in self.widget_list: w.destroy()
         self.widget_list = []
-        for data in self.scan_data: self.add_one_widget(data)
+        for data in self.app_state.get_items(): self.add_one_widget(data)
         
         self.save_last_memory()
         self.update_history_buttons()
         self.update_dashboard(f"Batch delete: {len(didelete_batch)} removed.", 0)
         self.var_semua.set(False)
 
-        if not self.scan_data:
+        if not self.app_state.get_items():
             self.btn_download.configure(state="disabled")
 
     def update_history_buttons(self):
-        state_undo = "normal" if self.undo_stack else "disabled"
-        state_redo = "normal" if self.redo_stack else "disabled"
+        state_undo = "normal" if self.app_state.can_undo() else "disabled"
+        state_redo = "normal" if self.app_state.can_redo() else "disabled"
         if hasattr(self, 'btn_back'): self.btn_back.configure(state=state_undo)
         if hasattr(self, 'btn_forward'): self.btn_forward.configure(state=state_redo)
 
@@ -605,19 +565,15 @@ class CyreneApp(BaseLayout):
             self.write_log("Cannot delete items while downloading.")
             return
 
-        if not is_redo: self.redo_stack.clear()
-        
-        if widget_target.data in self.scan_data:
-            self.undo_stack.append({'type': 'single', 'data': widget_target.data})
-            self.scan_data.remove(widget_target.data)
-        
+        self.app_state.remove_item(widget_target.data, is_redo=is_redo)
         widget_target.destroy()
         if widget_target in self.widget_list: self.widget_list.remove(widget_target)
         
         self.save_last_memory() 
         self.update_history_buttons()
 
-        if not self.scan_data:
+        items = self.app_state.get_items()
+        if not items:
             self.btn_download.configure(state="disabled")
             self.update_dashboard("Removed.", 0)
         else: 
@@ -627,71 +583,47 @@ class CyreneApp(BaseLayout):
     def action_clear_results(self):
         if self.is_downloading: return 
         
-        yang_deleted = [d for d in self.scan_data if not d.get('locked', False)]
+        yang_deleted = self.app_state.clear_unlocked()
         if not yang_deleted: return 
 
-        self.undo_stack.append({'type': 'batch', 'data': yang_deleted})
-        self.redo_stack.clear() 
-
-        data_sisa = [d for d in self.scan_data if d.get('locked', False)]
         for widget in self.widget_list: widget.destroy()
         self.widget_list = []
-        self.scan_data = data_sisa
-        for data in self.scan_data: self.add_one_widget(data)
+        for data in self.app_state.get_items(): self.add_one_widget(data)
         
         self.save_last_memory()
         self.update_history_buttons()
 
-        if not self.scan_data:
+        items = self.app_state.get_items()
+        if not items:
             self.btn_download.configure(state="disabled")
             self.update_dashboard("List cleared.", 0)
         else:
             self.btn_download.configure(state="normal")
-            self.update_dashboard(f"List cleared. {len(self.scan_data)} locked.", 0)
+            self.update_dashboard(f"List cleared. {len(items)} locked.", 0)
         self.aksi_cek_seleksi_manual()
 
     def action_back(self): 
-        if not self.undo_stack: return
-        action = self.undo_stack.pop()
-        self.redo_stack.append(action) 
-        if action['type'] == 'single':
-            item = action['data']
-            self.scan_data.append(item)
+        msg, items = self.app_state.undo()
+        if not msg: return
+        for item in items:
             self.add_one_widget(item)
-            msg = "Undo: Item restored."
-        elif action['type'] == 'batch':
-            items = action['data']
-            for item in items:
-                self.scan_data.append(item)
-                self.add_one_widget(item)
-            msg = f"Undo: {len(items)} items restored."
         self.save_last_memory()
         self.update_history_buttons()
         self.update_dashboard(msg, 0)
 
     def action_forward(self): 
-        if not self.redo_stack: return
-        action = self.redo_stack.pop()
-        self.undo_stack.append(action) 
-        items_to_remove = []
-        if action['type'] == 'single':
-            items_to_remove = [action['data']]
-            msg = "Redo: Item deleted."
-        elif action['type'] == 'batch':
-            items_to_remove = action['data']
-            msg = f"Redo: {len(items_to_remove)} items deleted."
-        for item in items_to_remove:
-            if item in self.scan_data: 
-                self.scan_data.remove(item)
-                for w in list(self.widget_list):
-                    if w.data == item:
-                        w.destroy()
-                        if w in self.widget_list: self.widget_list.remove(w)
-                        break
+        msg, items_removed = self.app_state.redo()
+        if not msg: return
+        for item in items_removed:
+            for w in list(self.widget_list):
+                if w.data.get('url_dl') == item.get('url_dl'):
+                    w.destroy()
+                    if w in self.widget_list: self.widget_list.remove(w)
+                    break
         self.save_last_memory()
         self.update_history_buttons()
         self.update_dashboard(msg, 0)
-        if not self.scan_data: self.btn_download.configure(state="disabled")
+        if not self.app_state.get_items(): self.btn_download.configure(state="disabled")
     
     # --- Download Logic ---
     def check_subtitle_then_continue(self, items, callback):
@@ -720,7 +652,7 @@ class CyreneApp(BaseLayout):
         self.subs_popup = SubtitlePopup(self, subs_dict, on_confirm=callback, on_cancel=lambda: None, title_context=title_context)
 
     def start_download(self):
-        selected_items = [d for d in self.scan_data if d.get('selected', False)]
+        selected_items = [d for d in self.app_state.get_items() if d.get('selected', False)]
         if not selected_items: return self.update_dashboard("Select video first!", 0)
         
         valid_items = []
@@ -859,16 +791,7 @@ class CyreneApp(BaseLayout):
             def cb_wrapper(prog_val, prog_text):
                 progress_manager(url, prog_val, prog_text)
 
-            used_cookie = cookie_path_global
-            
-            domain_detect = "unknown"
-            if "facebook.com" in url: domain_detect = "facebook_com"
-            elif "bilibili.com" in url: domain_detect = "bilibili_com"
-            elif "tiktok.com" in url: domain_detect = "tiktok_com"
-            elif "youtube.com" in url: domain_detect = "youtube_com"
-            
-            specific_cookie = os.path.join(DATA_DIR, f"cookies_{domain_detect}.txt")
-            if os.path.exists(specific_cookie): used_cookie = specific_cookie
+            used_cookie = DomainManager.get_domain_cookie_path(url, cookie_path_global)
             tools_utk_ini = (yt_dlp_p, ffmpeg_p, used_cookie)
             
             try:
@@ -888,7 +811,6 @@ class CyreneApp(BaseLayout):
         
         with ThreadPoolExecutor(max_workers=int(parallel_count)) as executor:
             futures = [executor.submit(worker_tugas, item) for item in list_data]
-            import time
             while not all(f.done() for f in futures):
                 if self.stop_event_download.is_set():
                     cancelled = True
@@ -902,9 +824,7 @@ class CyreneApp(BaseLayout):
     def send_status_to_card(self, target_url, status_text, percent_value, color=None):
         for widget in self.widget_list:
             if widget.data.get('url_dl') == target_url:
-                if color:
-                    color = color
-                else:
+                if not color:
                     color = "#ffffff"
                     if "Error" in status_text or "ERR:" in status_text: color = "#ff5555"
                     elif "Waiting" in status_text: color = "#888888" 
@@ -923,7 +843,7 @@ class CyreneApp(BaseLayout):
             self.write_log("Download Stopped by User.")
             self.btn_open_folder.configure(fg_color="transparent")
             
-            for item in self.scan_data:
+            for item in self.app_state.get_items():
                 last_st = item.get('last_status', "")
                 if "Waiting" in last_st or "Starting" in last_st:
                     item['last_status'] = "Ready."
@@ -966,25 +886,14 @@ class CyreneApp(BaseLayout):
             self.btn_open_folder.configure(state="normal", fg_color="transparent")
         
     def load_last_memory(self):
-        if os.path.exists(HISTORY_FILE):
-            try:
-                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if data:
-                        clean_data = [item for item in data if 'url_dl' in item and 'title' in item]
-                        for item in clean_data:
-                            if 'selected' not in item: item['selected'] = True
-                            if 'locked' not in item: item['locked'] = False
-                        self.scan_data = clean_data
-                        for item in self.scan_data: self.add_one_widget(item)
-                        if self.scan_data: self.btn_download.configure(state="normal")
-            except Exception as e: print(f"Error: {e}")
+        loaded_items = self.app_state.load_history()
+        for item in loaded_items:
+            self.add_one_widget(item)
+        if loaded_items:
+            self.btn_download.configure(state="normal")
 
     def save_last_memory(self):
-        try:
-            if not os.path.exists(os.path.dirname(HISTORY_FILE)): os.makedirs(os.path.dirname(HISTORY_FILE))
-            with open(HISTORY_FILE, "w", encoding="utf-8") as f: json.dump(self.scan_data, f, indent=4)
-        except Exception as e: print(f"Error: {e}")
+        self.app_state.save_history()
 
     def update_dashboard(self, teks, val):
         display_text = teks[:60]+"..." if len(teks)>60 else teks
@@ -997,22 +906,21 @@ class CyreneApp(BaseLayout):
     def clear_input(self): self.box_link.delete("0.0", "end"); self.update_dashboard("Cleared.", 0)
     
     def action_toggle_all(self):
-        # Toggle boolean state
         self.var_semua.set(not self.var_semua.get())
         status = self.var_semua.get()
         
-        # Update Toggle Button UI explicitly since we are no longer using CTkSwitch
         if status:
             self.btn_select_all.configure(fg_color="#db2777", hover_color="#be185d", text_color="#ffffff", border_color="#db2777")
         else:
             self.btn_select_all.configure(fg_color="#1a1a1a", hover_color="#2b2b2b", text_color="#888888", border_color="#555555")
 
-        for d in self.scan_data: d['selected'] = status
+        self.app_state.toggle_all_selection(status)
         for w in self.widget_list: w.var_select.set(status)
 
     def aksi_cek_seleksi_manual(self):
-        if not self.scan_data: return
-        semua_aktif = all(d.get('selected', False) for d in self.scan_data)
+        items = self.app_state.get_items()
+        if not items: return
+        semua_aktif = all(d.get('selected', False) for d in items)
         if self.var_semua.get() != semua_aktif:
             self.var_semua.set(semua_aktif)
         
