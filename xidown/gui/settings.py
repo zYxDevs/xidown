@@ -155,22 +155,35 @@ class SettingsWindow(ctk.CTkToplevel):
     # 1. ABOUT
     def setup_about(self):
         self.page_about = ctk.CTkFrame(self.frame_content, fg_color="transparent")
-        ctk.CTkLabel(self.page_about, text=APP_NAME, font=("Terminal", 24, "bold"), text_color="#db2777").pack(pady=(25, 0))
+        ctk.CTkLabel(self.page_about, text=APP_NAME, font=("Terminal", 24, "bold"), text_color="#db2777").pack(pady=(15, 0))
         ctk.CTkLabel(self.page_about, text=APP_VER, font=("Terminal", 12, "bold"), text_color="gray").pack(pady=0)
         
         # Dev row (packed side-by-side to stay close)
         dev_row = ctk.CTkFrame(self.page_about, fg_color="transparent")
-        dev_row.pack(pady=(20, 5))
+        dev_row.pack(pady=(12, 4))
         ctk.CTkLabel(dev_row, text="Dev: ", font=("Terminal", 11, "bold")).pack(side="left")
         l = ctk.CTkLabel(dev_row, text="Indra Voyager", font=("Terminal", 11, "underline", "bold"), text_color="#61afef", cursor="hand2")
         l.pack(side="left")
-        l.bind("<Button-1>", lambda e: webbrowser.open("https://github.com/IndraVoyager"))
+        l.bind("<Button-1>", lambda e: webbrowser.open("https://github.com/indravoyager/xidown"))
 
         # Contributors row (names placed below the title)
         contrib_frame = ctk.CTkFrame(self.page_about, fg_color="transparent")
-        contrib_frame.pack(pady=(10, 20))
+        contrib_frame.pack(pady=(4, 10))
         ctk.CTkLabel(contrib_frame, text="Contributors:", font=("Terminal", 11, "bold"), text_color="white").pack()
         ctk.CTkLabel(contrib_frame, text="cyrene, merry, mitsuki31", font=("Terminal", 11, "bold"), text_color="white").pack()
+
+        # Trakteer Button
+        self.btn_trakteer = ctk.CTkButton(
+            self.page_about, 
+            text="♥ Support on Trakteer", 
+            fg_color="#c1272d", 
+            hover_color="#9e1b20", 
+            corner_radius=4,
+            font=("Terminal", 11, "bold"), 
+            height=28,
+            command=lambda: webbrowser.open("https://trakteer.id/indravoyager")
+        )
+        self.btn_trakteer.pack(pady=(2, 10))
 
     def show_about(self): self.set_active(self.btn_about); self.page_about.pack(fill="both", expand=True)
 
@@ -409,17 +422,21 @@ class SettingsWindow(ctk.CTkToplevel):
         st = "disabled" if self.use_default_var.get() else "normal"
         c = "#2b2b2b" if self.use_default_var.get() else "#343638"
         self.entry_path.configure(state=st, fg_color=c)
-        self.btn_browse.configure(state=st)
+        self.btn_browse.configure(state="normal")
 
     def select_folder(self):
         f = filedialog.askdirectory()
-        if f: self.entry_path.delete(0, "end"); self.entry_path.insert(0, f)
+        if f:
+            self.use_default_var.set(False)
+            self.toggle_storage_ui()
+            self.entry_path.delete(0, "end")
+            self.entry_path.insert(0, f)
     
     def show_storage(self): self.set_active(self.btn_storage); self.page_storage.pack(fill="both", expand=True)
 
     # --- SAVE ALL ---
     def save_all(self):
-        current_path = self.entry_path.get()
+        current_path = self.entry_path.get().strip()
         final_path = "" if self.use_default_var.get() else current_path
         new_data = {
             "quality": self.quality_var.get(),
@@ -431,5 +448,7 @@ class SettingsWindow(ctk.CTkToplevel):
         }
         save_config(new_data)
         if hasattr(self.parent, 'config'): self.parent.config = new_data
+        if hasattr(self.parent, 'reload_initial_config'):
+            self.parent.reload_initial_config()
         print("[System] Settings saved & synced.")
         self.destroy()

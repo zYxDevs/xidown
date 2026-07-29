@@ -738,15 +738,15 @@ class CyreneApp(BaseLayout):
     def real_download_process(self, list_data, format_type, proxy_string, quality_mode, thread_count, parallel_count, cookie_path_global, sub_langs=None):
         from datetime import datetime
         
-        if self.custom_save_path and os.path.exists(self.custom_save_path):
-            result_folder = self.custom_save_path
+        if self.custom_save_path and self.custom_save_path.strip():
+            result_folder = self.custom_save_path.strip()
         else:
             folder_bulan = f"{datetime.now().year}_{datetime.now().month:02d}"
             result_folder = os.path.join(DATA_DIR, folder_bulan)
         
         result_folder = os.path.abspath(result_folder)
         
-        if not os.path.exists(result_folder): os.makedirs(result_folder)
+        if not os.path.exists(result_folder): os.makedirs(result_folder, exist_ok=True)
         self.result_folder_terakhir = result_folder
         cancelled = False
         
@@ -870,17 +870,18 @@ class CyreneApp(BaseLayout):
     def reload_initial_config(self):
         cfg = settings.load_config()
         self.custom_save_path = cfg.get("save_path", "")
+        if cfg.get("use_default_path", True): self.custom_save_path = ""
         
         from datetime import datetime
-        if self.custom_save_path and os.path.exists(self.custom_save_path):
-            target_path = self.custom_save_path
+        if self.custom_save_path and self.custom_save_path.strip():
+            target_path = self.custom_save_path.strip()
         else:
             folder_bulan = f"{datetime.now().year}_{datetime.now().month:02d}"
             target_path = os.path.join(DATA_DIR, folder_bulan)
 
         self.result_folder_terakhir = os.path.abspath(target_path)
         if not os.path.exists(self.result_folder_terakhir):
-            try: os.makedirs(self.result_folder_terakhir)
+            try: os.makedirs(self.result_folder_terakhir, exist_ok=True)
             except Exception as e: print(f"Error: {e}") 
         if hasattr(self, 'btn_open_folder'):
             self.btn_open_folder.configure(state="normal", fg_color="transparent")
