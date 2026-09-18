@@ -4,11 +4,13 @@ import os
 import sys
 import webbrowser
 import shutil 
+import threading
 from tkinter import filedialog
 from datetime import datetime
 
 # [MARIBEL] Import version info
 from xidown.core.version import APP_NAME, APP_VER
+import xidown.core.setup as setup_core
 
 # NAVIGATION FIX (Ensure pointing to Root, not package)
 if getattr(sys, 'frozen', False):
@@ -72,7 +74,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.resizable(False, False)
         self.configure(fg_color="#121212")
 
-        w_width, w_height = 460, 320 
+        w_width, w_height = 490, 360 
         p_x = parent.winfo_x(); p_y = parent.winfo_y()
         p_w = parent.winfo_width(); p_h = parent.winfo_height()
         pos_x = p_x + (p_w // 2) - (w_width // 2)
@@ -96,9 +98,9 @@ class SettingsWindow(ctk.CTkToplevel):
         self.grid_rowconfigure(0, weight=1)
 
         # --- Sidebar ---
-        self.frame_sidebar = ctk.CTkFrame(self, width=115, corner_radius=0, fg_color="#1a1a1a")
+        self.frame_sidebar = ctk.CTkFrame(self, width=120, corner_radius=0, fg_color="#1a1a1a")
         self.frame_sidebar.grid(row=0, column=0, sticky="nsew")
-        self.frame_sidebar.grid_rowconfigure(8, weight=1) 
+        self.frame_sidebar.grid_rowconfigure(9, weight=1) 
 
         self.lbl_menu = ctk.CTkLabel(self.frame_sidebar, text="SETTINGS", font=("Terminal", 12, "bold"), text_color="gray")
         self.lbl_menu.grid(row=0, column=0, padx=5, pady=(12, 5)) 
@@ -109,13 +111,14 @@ class SettingsWindow(ctk.CTkToplevel):
         self.btn_cookies = self.create_sidebar_button("Cookies", 4, self.show_cookies)
         self.btn_resolution = self.create_sidebar_button("Resolution", 5, self.show_resolution)
         self.btn_storage = self.create_sidebar_button("Storage", 6, self.show_storage)
+        self.btn_engine = self.create_sidebar_button("yt-dlp Engine", 7, self.show_engine)
 
         self.btn_save_all = ctk.CTkButton(
-            self.frame_sidebar, text="Save", width=85, height=26, 
+            self.frame_sidebar, text="Save", width=90, height=26, 
             fg_color="#db2777", hover_color="#be185d", corner_radius=0,
             font=("Terminal", 12, "bold"), command=self.save_all
         )
-        self.btn_save_all.grid(row=9, column=0, padx=8, pady=12, sticky="s")
+        self.btn_save_all.grid(row=10, column=0, padx=8, pady=12, sticky="s")
 
         self.frame_content = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         self.frame_content.grid(row=0, column=1, sticky="nsew", padx=12, pady=10) 
@@ -126,9 +129,11 @@ class SettingsWindow(ctk.CTkToplevel):
         self.setup_cookies()
         self.setup_resolution()
         self.setup_storage()
+        self.setup_engine()
 
         self.show_about()
         self.after(50, self.deiconify)
+
 
     def create_sidebar_button(self, text, row, command):
         btn = ctk.CTkButton(
@@ -140,7 +145,7 @@ class SettingsWindow(ctk.CTkToplevel):
         return btn
 
     def reset_highlight(self):
-        buttons = [self.btn_about, self.btn_cache, self.btn_connection, self.btn_cookies, self.btn_resolution, self.btn_storage]
+        buttons = [self.btn_about, self.btn_cache, self.btn_connection, self.btn_cookies, self.btn_resolution, self.btn_storage, self.btn_engine]
         for btn in buttons:
             btn.configure(fg_color="transparent", text_color="gray90")
 
@@ -210,12 +215,12 @@ class SettingsWindow(ctk.CTkToplevel):
         self.btn_clear_cache.pack(anchor="w")
 
     def get_download_path(self):
-        # [MARIBEL FIX] Default path now goes to DATA_DIR folder
+        folder_bulan = f"{datetime.now().year}_{datetime.now().month:02d}"
+        default_path = os.path.join(DATA_DIR, folder_bulan)
         if self.config.get("use_default_path", True):
-            folder_bulan = f"{datetime.now().year}_{datetime.now().month:02d}"
-            return os.path.join(DATA_DIR, folder_bulan)
-        else:
-            return self.config.get("save_path", "")
+            return default_path
+        custom = self.config.get("save_path", "").strip()
+        return custom if custom else default_path
 
     def calculate_cache(self):
         thumb_dir = os.path.join(DATA_DIR, "thumbs")
@@ -400,8 +405,8 @@ class SettingsWindow(ctk.CTkToplevel):
         ctk.CTkLabel(self.page_storage, text="Download Location", font=("Terminal", 14, "bold")).pack(anchor="w", pady=(0, 8))
         self.use_default_var = ctk.BooleanVar(value=self.config.get("use_default_path", True))
         
-        # [MARIBEL FIX] Adjusted label display so the user knows it goes to data/ folder
-        path_def = f".../Videos/xidown/{datetime.now().year}_{datetime.now().month:02d}"
+        folder_bulan = f"{datetime.now().year}_{datetime.now().month:02d}"
+        path_def = f".../Videos/xidown/{folder_bulan}"
         
         self.chk_default = ctk.CTkCheckBox(
             self.page_storage, text=f"Default ({path_def})", variable=self.use_default_var, 
@@ -413,16 +418,24 @@ class SettingsWindow(ctk.CTkToplevel):
         f_in.pack(fill="x", pady=5)
         self.entry_path = ctk.CTkEntry(f_in, placeholder_text="Select folder...", height=26, font=("Terminal", 11, "bold"), corner_radius=0)
         self.entry_path.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        self.entry_path.insert(0, self.config.get("save_path", ""))
         self.btn_browse = ctk.CTkButton(f_in, text="Folder", width=50, height=26, command=self.select_folder, fg_color="#565f89", font=("Terminal", 11, "bold"), corner_radius=0)
         self.btn_browse.pack(side="right")
         self.toggle_storage_ui()
 
     def toggle_storage_ui(self):
-        st = "disabled" if self.use_default_var.get() else "normal"
-        c = "#2b2b2b" if self.use_default_var.get() else "#343638"
-        self.entry_path.configure(state=st, fg_color=c)
-        self.btn_browse.configure(state="normal")
+        folder_bulan = f"{datetime.now().year}_{datetime.now().month:02d}"
+        default_full_path = os.path.join(DATA_DIR, folder_bulan)
+        if self.use_default_var.get():
+            self.entry_path.configure(state="normal")
+            self.entry_path.delete(0, "end")
+            self.entry_path.insert(0, default_full_path)
+            self.entry_path.configure(state="disabled", fg_color="#2b2b2b")
+        else:
+            self.entry_path.configure(state="normal", fg_color="#343638")
+            saved = self.config.get("save_path", "").strip()
+            self.entry_path.delete(0, "end")
+            if saved and saved != default_full_path:
+                self.entry_path.insert(0, saved)
 
     def select_folder(self):
         f = filedialog.askdirectory()
@@ -434,14 +447,124 @@ class SettingsWindow(ctk.CTkToplevel):
     
     def show_storage(self): self.set_active(self.btn_storage); self.page_storage.pack(fill="both", expand=True)
 
+    # 7. ENGINE (yt-dlp)
+    def setup_engine(self):
+        self.page_engine = ctk.CTkFrame(self.frame_content, fg_color="transparent")
+        
+        ctk.CTkLabel(self.page_engine, text="yt-dlp Engine Manager", font=("Terminal", 14, "bold")).pack(anchor="w", pady=(0, 2))
+        ctk.CTkLabel(
+            self.page_engine, 
+            text="Download engine maintenance & extraction fixes.", 
+            font=("Terminal", 10), text_color="gray"
+        ).pack(anchor="w", pady=(0, 6))
+
+        # Version display frame
+        f_ver = ctk.CTkFrame(self.page_engine, fg_color="#1e1e1e", corner_radius=2, border_width=1, border_color="#333333")
+        f_ver.pack(fill="x", pady=(0, 6), ipady=3)
+        
+        self.lbl_ytdlp_ver = ctk.CTkLabel(f_ver, text="Engine Version: Checking...", font=("Terminal", 11, "bold"), text_color="#db2777")
+        self.lbl_ytdlp_ver.pack(anchor="w", padx=10, pady=(2, 0))
+        
+        self.lbl_engine_status = ctk.CTkLabel(f_ver, text="Ready", font=("Terminal", 10), text_color="#aaaaaa", justify="left", wraplength=310)
+        self.lbl_engine_status.pack(anchor="w", padx=10, pady=(0, 4))
+
+        # Channel Selector Row
+        f_chan = ctk.CTkFrame(self.page_engine, fg_color="transparent")
+        f_chan.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(f_chan, text="Channel:", font=("Terminal", 10, "bold"), text_color="#aaaaaa").pack(side="left", padx=(0, 6))
+        
+        self.channel_var = ctk.StringVar(value="stable")
+        self._chan_btns = []
+        for name, val in [("Stable", "stable"), ("Nightly (Latest)", "nightly")]:
+            btn = ctk.CTkButton(
+                f_chan, text=name, height=24, corner_radius=0, font=("Terminal", 10, "bold"),
+                fg_color="#db2777" if self.channel_var.get() == val else "#2b2b2b",
+                hover_color="#be185d" if self.channel_var.get() == val else "#3a3a3a",
+                command=lambda v=val: self._set_channel(v)
+            )
+            btn.pack(side="left", padx=(0, 4))
+            btn._val = val
+            self._chan_btns.append(btn)
+
+        # Single Action Button
+        self.btn_update_engine = ctk.CTkButton(
+            self.page_engine, text="Update / Restart yt-dlp", height=32,
+            fg_color="#db2777", hover_color="#be185d", corner_radius=0,
+            font=("Terminal", 11, "bold"), command=self.action_update_ytdlp
+        )
+        self.btn_update_engine.pack(fill="x", pady=(4, 0))
+
+    def _set_channel(self, val):
+        self.channel_var.set(val)
+        for btn in self._chan_btns:
+            if btn._val == val:
+                btn.configure(fg_color="#db2777", hover_color="#be185d")
+            else:
+                btn.configure(fg_color="#2b2b2b", hover_color="#3a3a3a")
+
+    def show_engine(self):
+        self.set_active(self.btn_engine)
+        self.page_engine.pack(fill="both", expand=True)
+        self.refresh_engine_version()
+
+    def refresh_engine_version(self):
+        def _check():
+            ver = setup_core.get_ytdlp_version()
+            if ver:
+                txt = f"Engine Version: {ver}"
+                st = "Ready (Nightly)" if "nightly" in ver.lower() or len(ver.split(".")) > 3 else "Ready (Stable)"
+            else:
+                txt = "Engine Version: Not Detected"
+                st = "Binary missing or not found"
+            self.after(0, lambda: self._apply_engine_ver(txt, st))
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _apply_engine_ver(self, text_ver, text_status):
+        if hasattr(self, 'lbl_ytdlp_ver'):
+            self.lbl_ytdlp_ver.configure(text=text_ver)
+        if hasattr(self, 'lbl_engine_status'):
+            self.lbl_engine_status.configure(text=text_status)
+
+    def action_update_ytdlp(self):
+        chosen_chan = self.channel_var.get()
+        chan_title = "Nightly" if chosen_chan == "nightly" else "Stable"
+        self.btn_update_engine.configure(state="disabled", text="Updating Engine...")
+        self.lbl_engine_status.configure(text=f"Updating & refreshing ({chan_title})...", text_color="#00ffcc")
+        
+        def _task():
+            def cb(p, msg):
+                self.after(0, lambda: self.lbl_engine_status.configure(text=msg, text_color="#00ffcc"))
+            success, msg = setup_core.update_ytdlp(channel=chosen_chan, progress_callback=cb)
+            ver = setup_core.get_ytdlp_version()
+            self.after(0, lambda: self._on_update_done(success, msg, ver))
+        threading.Thread(target=_task, daemon=True).start()
+
+    def _on_update_done(self, success, msg, ver):
+        self.btn_update_engine.configure(state="normal", text="Update / Restart yt-dlp")
+        color = "#27ae60" if success else "#ff5555"
+        self.lbl_engine_status.configure(text=msg, text_color=color)
+        if ver:
+            self.lbl_ytdlp_ver.configure(text=f"Engine Version: {ver}")
+        if hasattr(self.parent, 'reload_tools'):
+            self.parent.reload_tools()
+        self.after(5000, lambda: self.lbl_engine_status.configure(text_color="#aaaaaa"))
+
     # --- SAVE ALL ---
     def save_all(self):
+        folder_bulan = f"{datetime.now().year}_{datetime.now().month:02d}"
+        default_full_path = os.path.join(DATA_DIR, folder_bulan)
         current_path = self.entry_path.get().strip()
-        final_path = "" if self.use_default_var.get() else current_path
+        if self.use_default_var.get() or not current_path or current_path == default_full_path:
+            final_path = ""
+            use_default = True
+        else:
+            final_path = current_path
+            use_default = False
+
         new_data = {
             "quality": self.quality_var.get(),
             "save_path": final_path,
-            "use_default_path": self.use_default_var.get(),
+            "use_default_path": use_default,
             "threads": self.threads_var.get(),
             "parallel_count": self.parallel_var.get(), 
             "cookie_path": self.entry_cookie.get().strip() 
@@ -451,4 +574,4 @@ class SettingsWindow(ctk.CTkToplevel):
         if hasattr(self.parent, 'reload_initial_config'):
             self.parent.reload_initial_config()
         print("[System] Settings saved & synced.")
-        self.destroy()
+        self.destroy()

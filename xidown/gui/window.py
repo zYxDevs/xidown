@@ -27,9 +27,9 @@ class RightClickMenu(ctk.CTkToplevel):
         x, y = coords
         
         # [MARIBEL UI] Adjust menu height to fit perfectly
-        h_menu = 90 if mode == "batch" else 120 
+        h_menu = 90 if mode == "batch" else 150 
         
-        self.geometry(f"160x{h_menu}+{x}+{y}")
+        self.geometry(f"165x{h_menu}+{x}+{y}")
         self.configure(fg_color="#333333") # Using Toplevel bg as border
         self.frame = ctk.CTkFrame(self, fg_color="#1a1a1a", corner_radius=0)
         self.frame.pack(fill="both", expand=True, padx=1, pady=1) # Leave 1px to make border smooth without holes
@@ -45,6 +45,9 @@ class RightClickMenu(ctk.CTkToplevel):
             
             if 'download' in commands:
                 self.add_menu_item("Download", commands['download'], text_color="#ffffff")
+                
+            if 'open_folder' in commands:
+                self.add_menu_item("Open Folder", commands['open_folder'], text_color="#ffffff")
             # -------------------------------
 
             text_pin = "Unpin Item" if commands.get('is_locked') else "Pin Item"
@@ -161,14 +164,17 @@ class ThumbnailCard(ctk.CTkFrame):
         self.checkbox._canvas.bind("<Button-1>", self.on_click_start_select); self.checkbox._canvas.bind("<B1-Motion>", self.on_drag_motion_select)
 
     def open_context_menu(self, event):
+        def _open_folder():
+            root = self.winfo_toplevel()
+            if hasattr(root, 'open_folder'):
+                root.open_folder()
+
         commands = { 
             'pin': self.toggle_lock, 
             'delete': self.action_delete_self, 
             'test': self.call_test_play,
-            
-            # [NEW] Bridge trigger download
             'download': self.call_forced_download,
-            
+            'open_folder': _open_folder,
             'is_locked': self.data.get('locked', False) 
         }
         RightClickMenu(self, (event.x_root, event.y_root), commands, mode="single")

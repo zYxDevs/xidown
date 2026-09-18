@@ -780,6 +780,9 @@ class CyreneApp(BaseLayout):
                     break
             self.after(0, lambda: self.send_status_to_card(url_key, status_lengkap, progress_val))
 
+        success_list = []
+        success_lock = threading.Lock()
+
         def worker_tugas(item):
             if self.stop_event_download.is_set(): return
             url = item['url_dl']
@@ -795,17 +798,24 @@ class CyreneApp(BaseLayout):
             tools_utk_ini = (yt_dlp_p, ffmpeg_p, used_cookie)
             
             try:
-                downloader.run(
+                success = downloader.run(
                     url, result_folder, False, None, tools_utk_ini, format_type, None, 
                     cb_wrapper, self.stop_event_download, proxy_string, quality_mode, None, 'abaikan', 
                     part_count=thread_count, custom_title=title_fixed, sub_langs=sub_langs 
                 )
-                if not self.stop_event_download.is_set():
+                if self.stop_event_download.is_set():
+                    return
+
+                if success:
+                    with success_lock:
+                        success_list.append(url)
                     progress_manager(url, 100.0, "Done.")
                     self.after(0, lambda: self.write_log(f"Completed: {title_fixed[:40]}"))
+                else:
+                    self.after(0, lambda: self.write_log(f"Failed: {title_fixed[:40]}"))
             except Exception as e:
-                progress_manager(url, 0.0, f"Error: {str(e)}")
-                self.after(0, lambda: self.write_log(f"Error: {str(e)}"))
+                progress_manager(url, 0.0, f"Error: {str(e)[:40]}")
+                self.after(0, lambda: self.write_log(f"Error: {str(e)[:40]}"))
 
         self.update_dashboard(f"Starting {parallel_count} parallel workers...", 0)
         
@@ -819,14 +829,14 @@ class CyreneApp(BaseLayout):
 
         self.save_last_memory() 
         self.is_downloading = False
-        self.after(0, lambda: self.reset_download_button(cancelled))
+        self.after(0, lambda: self.reset_download_button(cancelled, len(success_list), total_files))
         
     def send_status_to_card(self, target_url, status_text, percent_value, color=None):
         for widget in self.widget_list:
             if widget.data.get('url_dl') == target_url:
                 if not color:
                     color = "#ffffff"
-                    if "Error" in status_text or "ERR:" in status_text: color = "#ff5555"
+                    if "Error" in status_text or "ERR:" in status_text or "Failed" in status_text: color = "#ff5555"
                     elif "Waiting" in status_text: color = "#888888" 
                     elif percent_value >= 100: color = "#db2777"
                     elif percent_value == 0: color = "#aaaaaa"
@@ -834,7 +844,7 @@ class CyreneApp(BaseLayout):
                 widget.set_download_status(status_text, color)
                 break
 
-    def reset_download_button(self, status_cancel):
+    def reset_download_button(self, status_cancel, success_count=0, total_count=0):
         self.btn_download.configure(text="Download", fg_color="#db2777", hover_color="#be185d", state="normal", command=self.start_download)
         self.btn_clean_list.configure(state="normal")
         
@@ -849,12 +859,55 @@ class CyreneApp(BaseLayout):
                     item['last_status'] = "Ready."
                     self.after(0, lambda u=item['url_dl']: self.send_status_to_card(u, "Ready.", 0, color="#aaaaaa"))
         else:
-            self.progress_bar.set(1.0)
-            self.write_log("All Tasks Finished.")
-            self.btn_open_folder.configure(fg_color="#db2777", hover_color="#be185d")
+            if success_count > 0:
+                self.progress_bar.set(1.0)
+                if success_count == total_count:
+                    self.update_dashboard("All Tasks Finished.", 1.0)
+                    self.write_log("All Tasks Finished.")
+                else:
+                    self.update_dashboard(f"Finished: {success_count}/{total_count} downloaded.", 1.0)
+                    self.write_log(f"Finished: {success_count}/{total_count} files successfully downloaded.")
+                self.btn_open_folder.configure(state="normal", fg_color="#db2777", hover_color="#be185d")
+            else:
+                self.progress_bar.set(0.0)
+                self.update_dashboard("Download Failed. Check log or update yt-dlp in Settings.", 0)
+                self.write_log("Download batch finished with errors (0 files downloaded).")
+                self.btn_open_folder.configure(state="normal", fg_color="transparent")
             
     def open_folder(self):
-        if self.result_folder_terakhir and os.path.exists(self.result_folder_terakhir): os.startfile(self.result_folder_terakhir)
+        target = self.result_folder_terakhir
+        if not target or not os.path.exists(target):
+            self.reload_initial_config()
+            target = self.result_folder_terakhir
+
+        if target:
+            if not os.path.exists(target):
+                try:
+                    os.makedirs(target, exist_ok=True)
+                except Exception as e:
+                    self.write_log(f"Error creating folder: {e}")
+                    return
+
+            try:
+                if sys.platform == "win32":
+                    os.startfile(target)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", target])
+                else:
+                    subprocess.Popen(["xdg-open", target])
+                self.write_log(f"Opened folder: {target}")
+            except Exception as e:
+                self.write_log(f"Cannot open folder: {e}")
+        else:
+            self.write_log("Target folder is not set.")
+
+    def reload_tools(self):
+        self.tools = utils.check_setup()
+        if self.tools:
+            self.write_log("yt-dlp engine reloaded successfully.")
+        else:
+            self.write_log("Warning: yt-dlp / ffmpeg tools missing!")
+        return self.tools is not None
 
     def open_settings_popup(self):
         if self.settings_window is None or not self.settings_window.winfo_exists(): self.settings_window = settings.SettingsWindow(self)

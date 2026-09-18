@@ -31,7 +31,7 @@ def run(url: str, result_folder: PathLike,
         duplicate_option: Optional[AnyDict] = None,
         part_count: int = 2,
         custom_title: Optional[str] = None,
-        sub_langs: Optional[Union[str, List[str]]] = None):
+        sub_langs: Optional[Union[str, List[str]]] = None) -> bool:
     yt_dlp_path, ffmpeg_dir, cookie_path = tools_paths
 
     # 1. Ensure primary output directory exists
@@ -217,34 +217,38 @@ def run(url: str, result_folder: PathLike,
                         if callback_progress: callback_progress(0, f"ERR: {err_msg[:40]}")
 
             rc = process.poll() if process else -1
-            is_success = (rc == 0) or is_done or file_exists
+            # Download is only considered successful if returncode is 0 without fatal errors, or file already exists
+            is_success = (rc == 0 and not error_captured) or file_exists
 
             if is_success:
                 if folder_temp.exists():
                     safe_rmdir(folder_temp)
 
-                if stop_event.is_set(): return
+                if stop_event.is_set():
+                    return False
 
                 if file_exists:
                     if callback_progress: callback_progress(100, "Done (Exists)!")
                 else:
                     if callback_progress: callback_progress(100, "Done!")
-                return
+                return True
 
             else:
-                if attempt_cookie:
+                if attempt_cookie and (None in tries):
                     if callback_progress:
                         callback_progress(0, "Cookie error. Retrying without cookies...")
                     continue
 
                 if not stop_event.is_set():
-                    err_lbl = error_captured if error_captured else "Failed. Check Connection."
+                    err_lbl = error_captured if error_captured else "Failed. Check Connection/Engine."
                     if callback_progress: callback_progress(0, f"ERR: {err_lbl[:40]}")
+                return False
 
         except Exception as e:
-            if not attempt_cookie:
+            if not attempt_cookie or (None not in tries):
                 if callback_progress:
                     callback_progress(0, f"Error: {str(e)[:40]}")
+                return False
         finally:
             if process and process.poll() is None:
                 try:
@@ -252,3 +256,5 @@ def run(url: str, result_folder: PathLike,
                     process.wait()
                 except Exception:
                     pass
+
+    return False
